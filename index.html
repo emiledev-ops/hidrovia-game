@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hidrovia Game</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#27352b;font:15px ui-monospace,Menlo,Consolas,monospace;color:#3b2f22}
+#wrap{position:relative;width:min(960px,100vw)}
+canvas{display:block;width:100%;height:auto;border:4px solid #5a4630;border-radius:6px;background:#78b35a}
+#ui{position:absolute;inset:4px;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.panel{pointer-events:auto;background:#f4e9cf;border:4px solid #5a4630;border-radius:8px;padding:14px 18px;width:min(780px,94%);max-height:96%;overflow:auto;box-shadow:0 6px 0 #0005}
+h1,h2{margin:0 0 6px}h1{font-size:28px}h2{font-size:20px}
+p{margin:6px 0}.tag{color:#7a5c2e;font-style:italic}.hint{font-size:12px;opacity:.75}
+button{font:inherit;cursor:pointer;background:#d9a441;color:#3b2f22;border:3px solid #5a4630;border-radius:6px;padding:6px 12px;margin:4px 6px 4px 0;box-shadow:0 3px 0 #5a4630}
+button:hover{filter:brightness(1.08)}button:active{transform:translateY(2px);box-shadow:0 1px 0 #5a4630}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.ghost{background:#e6d9b8}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:8px}
+.card{background:#fff8e2;border:3px solid #5a4630;border-radius:6px;padding:8px}
+.card b{display:block}.tagp{display:inline-block;font-size:11px;background:#d9a441;border-radius:4px;padding:0 5px}
+.red{color:#a33}.green{color:#2f7a3a}
+table{width:100%;border-collapse:collapse}td{padding:2px 0}td:last-child{text-align:right}
+input[type=range]{width:100%}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="540"></canvas><div id="ui"></div></div>
+<script>
+'use strict';
+/* ===== Config ===== */
+const W=960,H=540,END=7000,LOCK=3500,FP=3.2,KEY='hidrovia_game_save_v1';
+const PU=[{n:'Tupi I',spd:1,fuel:1,cost:0},{n:'Tupi II',spd:1.2,fuel:1.05,cost:900},{n:'Tupi III',spd:1.4,fuel:1.12,cost:2400}];
+const TANK=[200,300,450,650],TC=[0,400,900,1800],HULL=[100,140,190],HC=[0,500,1200];
+const CARGO=[{n:'Soja',v:600,c:'#e0b83c'},{n:'Milho',v:520,c:'#f0d060'},{n:'Farelo de soja',v:560,c:'#b88a4a'}];
+const def={money:900,rep:10,day:1,pushers:[0],barges:2,tank:0,hull:0,wh:false};
+/* ===== Utils ===== */
+const cv=document.getElementById('c'),g=cv.getContext('2d'),ui=document.getElementById('ui'),$=id=>document.getElementById(id);
+const R=n=>'R$ '+Math.round(n).toLocaleString('pt-BR'),pad=n=>String(n).padStart(2,'0'),clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const clone=o=>JSON.parse(JSON.stringify(o));
+const hs=n=>{n=Math.sin(n*127.1+311.7)*43758.5453;return n-Math.floor(n)};
+function rng(s){return()=>{s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+let AC,muted=false;
+function beep(f=440,d=.08,t='square',v=.04){if(muted)return;try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();const o=AC.createOscillator(),n=AC.createGain();o.type=t;o.frequency.value=f;n.gain.value=v;o.connect(n);n.connect(AC.destination);o.start();n.gain.exponentialRampToValueAtTime(.0001,AC.currentTime+d);o.stop(AC.currentTime+d)}catch(e){}}
+/* ===== Save ===== */
+let S=loadS();
+function loadS(){try{const j=JSON.parse(localStorage.getItem(KEY));return j?{...clone(def),...j}:clone(def)}catch(e){return clone(def)}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}}
+const hasSave=()=>{try{return!!localStorage.getItem(KEY)}catch(e){return false}};
+/* ===== Mundo ===== */
+let drought=false;
+const cy=x=>270+Math.sin(x*.0035)*105+Math.sin(x*.0117+1)*38;
+const hw=x=>(66+9*Math.sin(x*.002+2))*(drought?.82:1)*(1-.2*clamp((120-Math.abs(x-LOCK))/30,0,1));
+const vm=(l,p)=>90*PU[p].spd*(1-.12*l),bn=(l,p,t)=>1.6*(.15+t*t)*(.6+.15*l)*PU[p].fuel;
+const est=(l,p,t=.8)=>END/(vm(l,p)*t*.92)*bn(l,p,t),etaH=(l,p)=>END/(vm(l,p)*.8*.92)/6;
+/* ===== Estado ===== */
+let mode='menu',T=0,paused=false,clock=420,startClock=420,cur=null,PI=0,lots=2,DAY={},C=[],obs=[],npc=[],lockDone=false,lowW=false,fees=0,co2x=0,paid=0,toasts=[],shake=0,shopNext=false;
+let B={x:60,y:cy(60),a:0,v:0,th:.6,fuel:100,hull:100,hullMax:100,used:0,cool:0};
+const keys={};
+addEventListener('keydown',e=>{const k=e.key.length===1?e.key.toLowerCase():e.key;keys[k]=1;if(k.startsWith('Arrow')||k===' ')e.preventDefault();if(k==='p'&&mode==='sail')paused=!paused;if(k==='m')muted=!muted});
+addEventListener('keyup',e=>{keys[e.key.length===1?e.key.toLowerCase():e.key]=0});
+addEventListener('blur',()=>{for(const k in keys)keys[k]=0});
+const toast=(txt,t=3.2)=>toasts.push({txt,t});
+/* ===== UI / telas ===== */
+const show=h=>{ui.innerHTML='<div class="panel">'+h+'</div>'},hide=()=>{ui.innerHTML=''};
+function title(){mode='menu';show(`<h1>🚢 Hidrovia Game</h1><p class=tag>Cuide do seu comboio. Navegue o rio. Construa sua reputação logística.</p><p>Hidrovia Tietê-Paraná: São Simão (GO) → Pederneiras (SP) → Porto de Santos.</p><p>Escolha contratos, forme o comboio, enfrente estiagem, eclusa e tráfego. Equilibre custo, prazo, integridade da carga e CO₂.</p><button onclick="newDay()">${hasSave()?'Continuar · dia '+S.day:'Começar'}</button>${hasSave()?'<button class=ghost onclick="resetGame()">Novo jogo</button>':''}<p class=hint>Leme: W/S ou ↑/↓ · Acelerador: A/D ou ←/→ · Pausa: P · Som: M</p>`)}
+function resetGame(){if(!confirm('Apagar o progresso?'))return;try{localStorage.removeItem(KEY)}catch(e){}S=clone(def);newDay()}
+function dayRoll(){
+ if(S.money<300){S.money=300;DAY.aid=true}else DAY.aid=false;
+ const r=rng(S.day*977+13);DAY.drought=r()<.3;DAY.strike=r()<.12;DAY.high=r()<.25;
+ const bp=Math.max(...S.pushers);C=[];
+ for(let i=0;i<4;i++){
+  const cg=CARGO[Math.floor(r()*3)],dest=r()<.45?'Santos':'Pederneiras',l=1+Math.floor(r()*Math.min(4,S.barges+1)),prem=S.rep>=25&&i===0;
+  const vl=Math.round(cg.v*(dest==='Santos'?1.75:1)*(.85+r()*.4)*(DAY.high?1.25:1)*(1+S.rep/250)*(prem?1.35:1));
+  C.push({id:S.day*10+i,cargo:cg.n,col:cg.c,dest,lots:l,prem,value:vl*l,deadline:Math.ceil(etaH(l,bp)*(prem?1.1:1.35)+5+(dest==='Santos'?18:0))});
+ }
+}
+function newDay(){dayRoll();board()}
+function board(){
+ mode='menu';
+ const ev=[DAY.aid?'🤝 Auxílio da cooperativa: caixa recomposto para R$ 300.':'',DAY.drought?'🌵 Estiagem: rio mais estreito e bancos de areia.':'',DAY.strike?'✊ Greve na eclusa: fila maior.':'',DAY.high?'📈 Frete aquecido: contratos +25%.':''].filter(Boolean);
+ show(`<h2>Dia ${S.day} · Terminal São Simão (GO)</h2><p>${R(S.money)} · Reputação ${S.rep} · ${S.barges} barcaça(s) · tanque ${TANK[S.tank]} L${S.wh?' · armazém':''}</p>${ev.map(e=>`<p>${e}</p>`).join('')}<div class=cards>${C.map((c,i)=>`<div class=card>${c.prem?'<span class=tagp>PREMIUM</span>':''}<b>${c.cargo} ×${c.lots}</b>→ ${c.dest==='Santos'?'Pederneiras + trem p/ Santos':'Pederneiras'}<br>Prazo: ${c.deadline}h<br><b>${R(c.value)}</b><button ${c.lots>S.barges?'disabled':''} onclick="pick(${i})">${c.lots>S.barges?'Falta barcaça':'Aceitar'}</button></div>`).join('')}</div><p><button class=ghost onclick="shopNext=false;shop()">🔧 Loja / Oficina</button></p>`);
+}
+function pick(i){cur=C[i];lots=cur.lots;formation()}
+function formation(){
+ const own=S.pushers;
+ show(`<h2>Formar comboio · ${cur.cargo} ×${cur.lots} → ${cur.dest}</h2><p>Empurrador:</p>${own.map((p,k)=>`<label><input type=radio name=p value=${p} ${k===own.length-1?'checked':''} onchange="fm()"> ${PU[p].n} (vel ×${PU[p].spd}, consumo ×${PU[p].fuel})</label><br>`).join('')}<p>Combustível a bordo: <b id=fl></b> L — <span id=fc></span> (${R(FP)}/L)</p><input type=range id=f min=30 max=${TANK[S.tank]} step=5><p id=es class=hint></p><button onclick="go()">⚓ Zarpar</button><button class=ghost onclick="board()">Voltar</button>`);
+ fm(true);
+}
+function fm(init){
+ const p=+document.querySelector('input[name=p]:checked').value,e=est(lots,p),f=$('f');
+ if(init)f.value=clamp(Math.ceil(e*1.15/5)*5,30,TANK[S.tank]);
+ $('fl').textContent=f.value;$('fc').textContent=R(f.value*FP);
+ $('es').textContent=`Consumo estimado em ritmo médio: ~${Math.round(e)} L${e>TANK[S.tank]?' (acima do seu tanque! melhore o tanque ou use menos barcaças)':''}. Sobra de diesel é devolvida a 60%.`;
+}
+function go(){
+ const p=+document.querySelector('input[name=p]:checked').value;let f=+$('f').value;
+ if(f*FP>S.money)f=Math.floor(S.money/FP/5)*5;
+ if(f<5){alert('Sem caixa para combustível.');return}
+ PI=p;paid=Math.round(f*FP);S.money-=paid;startRun(f);
+}
+function startRun(f){
+ drought=DAY.drought;lots=cur.lots;lowW=false;
+ B={x:60,y:cy(60),a:0,v:0,th:.6,fuel:f,hull:HULL[S.hull],hullMax:HULL[S.hull],used:0,cool:0};
+ clock=startClock=360;lockDone=false;fees=0;co2x=0;toasts=[];
+ const r=rng(S.day*31+cur.id),n=drought?9:3;obs=[];
+ for(let i=0;i<n;i++){let x=700+(i+r())*(5800/n);if(Math.abs(x-LOCK)<220)x+=320;const s=r()<.5?-1:1;obs.push({x,y:cy(x)+s*(r()*.4+.2)*hw(x),r:18+r()*8})}
+ npc=[];for(let i=0;i<4;i++)npc.push({x:500+r()*5600,off:(r()-.5)*36,v:20+r()*10,l:1+Math.floor(r()*3),y:0});
+ hide();mode='sail';paused=false;
+ toast(drought?'🌵 Estiagem: cuidado com os bancos de areia!':'Bom dia! Siga o rio até Pederneiras.');beep(220,.25,'sawtooth');
+}
+function lockEvent(){
+ mode='event';B.v=0;
+ const w=Math.floor(Math.random()*5)+(DAY.strike?5:0),risk=drought?65:40;
+ show(`<h2>🔒 Eclusa de Nova Avanhandava</h2><p>Fila: <b>${w}h</b>${DAY.strike?' (greve parcial!)':''}${drought?' · nível baixo (estiagem)':''}</p>`+(lots>=3
+  ?`<p>Comboio grande: a eclusa não comporta tudo de uma vez.</p><button onclick="lockGo(${w},1)">Desmembrar e passar em 2 etapas (+${w+3}h, seguro)</button><button onclick="lockGo(${w},2)">Eclusar inteiro (+${w}h, ${risk}% de risco de dano)</button>`
+  :`<button onclick="lockGo(${w},0)">Aguardar eclusagem (+${w+1}h)</button>`));
+}
+function lockGo(w,m){
+ let h=w+(m===1?3:m===0?1:0);
+ if(m===2&&Math.random()<(drought?.65:.4)){B.hull-=22;h+=1.5;shake=.4;beep(100,.3,'sawtooth');toast('💥 Batida na eclusa! Casco danificado.')}
+ clock+=h*60;lockDone=true;B.x=LOCK+60;B.y=cy(B.x);B.a=0;hide();
+ if(B.hull<=0)return finish('hull');
+ mode='sail';toast(`Eclusagem concluída (+${Math.round(h*10)/10}h).`);
+}
+function arrive(){mode='event';B.v=0;beep(520,.2,'triangle');if(cur.dest==='Santos')transb();else finish()}
+function transb(){show(`<h2>Terminal Pederneiras · Transbordo</h2><p>Descarga da hidrovia para a ferrovia rumo ao Porto de Santos.</p><button onclick="tb(0)">Fila normal: ${R(150*lots)} · +18h</button><button onclick="tb(1)">Prioridade de vagões: ${R(260*lots)} · +11h</button>`)}
+function tb(p){fees=(p?260:150)*lots;clock+=(p?11:18)*60;co2x=38*lots;finish()}
+function finish(fail){
+ mode='menu';shopNext=true;
+ const el=(clock-startClock)/60,late=Math.max(0,el-cur.deadline),dmg=Math.max(0,B.hullMax-B.hull),integ=Math.max(40,100-dmg*.35);
+ const refund=fail==='fuel'?0:Math.round(Math.max(0,B.fuel)*FP*.6),repair=Math.round(dmg*8),pen=fail?300:0;
+ let gross=0,rd=-5;
+ if(!fail){gross=Math.round(cur.value*(1-Math.min(.4,late*.04))*integ/100*(S.wh?1.08:1));rd=late>0?-(2+Math.min(5,Math.ceil(late))):3+(cur.prem?2:0)+(integ>=90?1:0)}
+ const net=gross-fees-repair-pen+refund,day=net-paid,co2=Math.round(B.used*2.68+co2x);
+ S.money=Math.max(0,S.money+net);S.rep=clamp(S.rep+rd,0,100);S.day++;save();
+ const msg=fail==='fuel'?'⛽ Acabou o diesel no rio. Comboio rebocado.':fail==='hull'?'💥 Casco comprometido. Comboio encalhado e rebocado.':late>0?`⏰ Entrega ${late.toFixed(1)}h atrasada.`:'✅ Entrega no prazo!';
+ show(`<h2>Relatório do dia</h2><p><b>${msg}</b></p><table><tr><td>Receita da carga</td><td>${R(gross)}</td></tr><tr><td>Combustível (${Math.round(B.used)} L usados)</td><td class=red>− ${R(paid)}</td></tr>${refund?`<tr><td>Devolução de sobra de diesel</td><td>+ ${R(refund)}</td></tr>`:''}${fees?`<tr><td>Transbordo</td><td class=red>− ${R(fees)}</td></tr>`:''}<tr><td>Reparos do casco</td><td class=red>− ${R(repair)}</td></tr>${pen?`<tr><td>Multa de reboque</td><td class=red>− ${R(pen)}</td></tr>`:''}<tr><td><b>Resultado</b></td><td><b class=${day>=0?'green':'red'}>${R(day)}</b></td></tr></table><p>⏱ ${el.toFixed(1)}h (prazo ${cur.deadline}h) · 🌱 ${co2.toLocaleString('pt-BR')} kg CO₂ · 📦 integridade ${Math.round(integ)}% · ⭐ reputação ${rd>=0?'+':''}${rd} → ${S.rep}</p><p class=hint>A hidrovia move carga com bem menos CO₂ por tonelada do que o rodoviário.</p><button onclick="shop()">Loja / Oficina ▶</button>`);
+ beep(fail?150:660,.3,'triangle');
+}
+function shop(){
+ mode='menu';const it=[];
+ if(S.barges<4)it.push(['barge','Barcaça extra (+1 lote; comboio fica mais lento)',700]);
+ const np=PU.findIndex((p,i)=>!S.pushers.includes(i));if(np>=0)it.push(['push',`Empurrador ${PU[np].n} (vel ×${PU[np].spd})`,PU[np].cost]);
+ if(S.tank<3)it.push(['tank',`Tanque de ${TANK[S.tank+1]} L`,TC[S.tank+1]]);
+ if(S.hull<2)it.push(['hull',`Casco reforçado (${HULL[S.hull+1]} pts)`,HC[S.hull+1]]);
+ if(!S.wh)it.push(['wh','Armazém no porto (+8% em cada entrega)',1500]);
+ show(`<h2>🔧 Loja · Oficina</h2><p>${R(S.money)}</p>${it.map(([k,n,c])=>`<p><button ${S.money<c?'disabled':''} onclick="buy('${k}',${c})">${R(c)}</button> ${n}</p>`).join('')||'<p>Tudo comprado! Você é um magnata da hidrovia.</p>'}<p>${shopNext?'<button onclick="newDay()">Próximo dia ▶</button>':'<button onclick="board()">Voltar</button>'}</p>`);
+}
+function buy(k,c){
+ if(S.money<c)return;S.money-=c;
+ if(k==='barge')S.barges++;else if(k==='push')S.pushers.push(PU.findIndex((p,i)=>!S.pushers.includes(i)));
+ else if(k==='tank')S.tank++;else if(k==='hull')S.hull++;else S.wh=true;
+ save();beep(880,.12,'triangle');shop();
+}
+/* ===== Simulação ===== */
+function hit(n,msg){if(B.cool>0)return;B.cool=.9;B.hull-=n;shake=.25;beep(110,.15,'sawtooth');if(msg)toast(msg)}
+function update(dt){
+ T+=dt;toasts.forEach(t=>t.t-=dt);toasts=toasts.filter(t=>t.t>0);shake=Math.max(0,shake-dt);
+ if(mode!=='sail'||paused)return;
+ const k=keys,vx=vm(lots,PI);
+ if(k.ArrowRight||k.d)B.th=Math.min(1,B.th+.7*dt);
+ if(k.ArrowLeft||k.a)B.th=Math.max(0,B.th-.7*dt);
+ const st=(k.ArrowDown||k.s?1:0)-(k.ArrowUp||k.w?1:0);
+ B.a=clamp(B.a+st*1.7*dt*(.3+.7*B.v/vx),-1.1,1.1);if(!st)B.a-=B.a*.45*dt;
+ B.v+=(vx*B.th-B.v)*Math.min(1,dt*1.2);
+ B.x+=Math.cos(B.a)*B.v*dt;B.y+=Math.sin(B.a)*B.v*dt;
+ const u=bn(lots,PI,B.th)*dt;B.fuel-=u;B.used+=u;clock+=dt*10;B.cool-=dt;
+ const ca=Math.cos(B.a),sa=Math.sin(B.a),P=[0,40,20+lots*42];
+ for(const o of P){const px=B.x+ca*o,py=B.y+sa*o,d=py-cy(px),lim=hw(px)-6;
+  if(Math.abs(d)>lim){const s=Math.sign(d);B.y-=s*(Math.abs(d)-lim);B.a-=s*.25;B.v*=.6;hit(4)}}
+ for(const o of obs)for(const q of P)if(Math.hypot(B.x+ca*q-o.x,B.y+sa*q-o.y)<o.r+7){B.v*=Math.pow(.2,dt*3);hit(2,'Encalhando no banco de areia!');break}
+ for(const n of npc){n.x+=n.v*dt;n.y=cy(n.x)+n.off;for(const q of P)if(Math.hypot(B.x+ca*q-n.x,B.y+sa*q-n.y)<24){B.v*=.5;B.y+=(B.y>n.y?1:-1)*10;hit(5,'Colisão com outro comboio!');break}}
+ if(!lowW&&B.fuel<TANK[S.tank]*.15){lowW=true;toast('⛽ Pouco combustível!')}
+ if(B.fuel<=0)return finish('fuel');
+ if(B.hull<=0)return finish('hull');
+ if(!lockDone&&B.x>=LOCK-50)return lockEvent();
+ if(B.x>=END)return arrive();
+}
+/* ===== Render ===== */
+function tx(s,x,y,c='#3b2f22',f='13px ui-monospace,Menlo,monospace',al='left'){g.fillStyle=c;g.font=f;g.textAlign=al;g.fillText(s,x,y)}
+function tw(s,x,y,f,al){tx(s,x+1,y+1,'#000a',f,al);tx(s,x,y,'#fff',f,al)}
+function pn(x,y,w,h){g.fillStyle='#5a4630';g.fillRect(x-3,y-3,w+6,h+6);g.fillStyle='#f4e9cf';g.fillRect(x,y,w,h)}
+function br(x,y,w,p,c){g.fillStyle='#d6c7a0';g.fillRect(x,y,w,10);g.fillStyle=c;g.fillRect(x,y,w*clamp(p,0,1),10);g.strokeStyle='#5a4630';g.lineWidth=2;g.strokeRect(x,y,w,10)}
+function band(cam,ex,col){g.fillStyle=col;g.beginPath();for(let x=-10;x<=W+10;x+=8){const w=cam+x;g.lineTo(x,cy(w)-hw(w)-ex)}for(let x=W+10;x>=-10;x-=8){const w=cam+x;g.lineTo(x,cy(w)+hw(w)+ex)}g.closePath();g.fill()}
+function tree(x,y,r){const s=10+r*6;g.fillStyle='#6b4a2b';g.fillRect(x-2,y,4,8);g.fillStyle='#2f7d3a';g.fillRect(x-s,y-s-2,s*2,s+4);g.fillStyle='#3f9a4a';g.fillRect(x-s+4,y-s-6,s*2-8,8)}
+function bld(x,y,w,h,c,rf){g.fillStyle=c;g.fillRect(x,y,w,h);g.fillStyle=rf;g.fillRect(x-3,y-8,w+6,10);g.fillStyle='#3b2f22';g.fillRect(x+w/2-5,y+h-14,10,14)}
+function convoy(x,y,a,l,bc,pc){
+ g.save();g.translate(x,y);g.rotate(a);
+ g.fillStyle='rgba(255,255,255,.5)';for(let i=0;i<4;i++)g.fillRect(-26-i*9,-2+(i%2)*3-1,6,2);
+ g.fillStyle=pc;g.fillRect(-18,-7,36,14);g.fillStyle='#e9e2cc';g.fillRect(-14,-4,14,8);g.fillStyle='#333';g.fillRect(4,-3,5,6);
+ for(let i=0;i<l;i++){g.fillStyle='#4a3a2a';g.fillRect(22+i*42,-9,40,18);g.fillStyle=bc;g.fillRect(24+i*42,-7,36,14);g.fillStyle='rgba(0,0,0,.15)';g.fillRect(24+i*42,-1,36,2)}
+ g.restore();
+}
+function render(){
+ const cam=B.x-300,i0=Math.floor(cam/48)-1;
+ g.save();if(shake)g.translate((Math.random()-.5)*6,0);
+ g.fillStyle='#78b35a';g.fillRect(-10,0,W+20,H);
+ for(let i=i0;i<i0+23;i++){const wx=i*48+hs(i)*40;g.fillStyle=hs(i*3)<.3?'#f6e27a':'#8cc66a';g.fillRect(wx-cam,cy(wx)+(hs(i*5)-.5)*500,3,3)}
+ band(cam,10,'#e8d08f');band(cam,0,'#4a94bf');
+ g.fillStyle='#86c8e6';
+ for(let x=0;x<W;x+=22){const w=cam+x,c=cy(w),h=hw(w);for(let j=-2;j<=2;j++)g.fillRect(x+((T*14+j*9)%22),c+j*h*.38+Math.sin(w*.04+T*2+j*2)*2,9,2)}
+ for(const o of obs){g.fillStyle='#c9b06a';g.beginPath();g.ellipse(o.x-cam,o.y,o.r+3,o.r*.7+3,0,0,7);g.fill();g.fillStyle='#e8d08f';g.beginPath();g.ellipse(o.x-cam,o.y,o.r,o.r*.7,0,0,7);g.fill()}
+ for(let i=i0;i<i0+23;i++)for(const s of[-1,1]){const q=i*2+(s>0?1:0);if(hs(q+.5)<.35)continue;const wx=i*48+hs(q)*40;tree(wx-cam,cy(wx)+s*(hw(wx)+22+hs(q+9)*90),hs(q+3))}
+ /* terminais */
+ const sy=cy(0)-hw(0)-95;bld(-30-cam,sy,90,50,'#c9b48a','#a8552f');bld(90-cam,sy+10,60,40,'#d8c9a0','#a8552f');g.fillStyle='#d8d8d0';g.fillRect(170-cam,sy-10,26,60);g.fillRect(200-cam,sy-10,26,60);tw('SÃO SIMÃO',-30-cam,sy-18,'bold 13px ui-monospace,monospace');
+ g.fillStyle='#7a5a36';g.fillRect(40-cam,cy(60)-hw(60)-8,24,14);
+ const ey=cy(END)+hw(END)+34;bld(END-80-cam,ey,100,50,'#c9b48a','#a8552f');bld(END+40-cam,ey+8,70,42,'#d8c9a0','#a8552f');g.fillStyle='#d8d8d0';g.fillRect(END+120-cam,ey-6,26,56);tw('PEDERNEIRAS',END-80-cam,ey-18,'bold 13px ui-monospace,monospace');
+ g.fillStyle='#7a5a36';g.fillRect(END-20-cam,cy(END)+hw(END)-6,26,14);
+ /* eclusa */
+ const lx=LOCK-cam,lc=cy(LOCK),lh=hw(LOCK);
+ g.fillStyle='#9a9a94';g.fillRect(lx-70,0,140,lc-lh+3);g.fillRect(lx-70,lc+lh-3,140,H);
+ g.fillStyle='#bdbdb5';g.fillRect(lx-70,lc-lh-2,140,5);g.fillRect(lx-70,lc+lh-3,140,5);
+ g.fillStyle='#6d6d68';g.fillRect(lx+66,lc-lh,4,lh*2);tw('ECLUSA N. AVANHANDAVA',lx,lc-lh-14,'bold 12px ui-monospace,monospace','center');
+ for(const n of npc)if(Math.abs(n.x-B.x)<700){n.y=cy(n.x)+n.off;convoy(n.x-cam,n.y,Math.atan2(cy(n.x+4)-cy(n.x),4),n.l,'#8a8a82','#7a4a3a')}
+ convoy(B.x-cam,B.y+(mode==='menu'?Math.sin(T*2)*1.5:0),B.a,lots,cur?cur.col:'#e0b83c','#2f6fb0');
+ /* noite / entardecer */
+ const h=(clock/60)%24,d=h>=20||h<5?.6:h>=18?.6*(h-18)/2:h<7?.6*(7-h)/2:0;
+ if(h>=16.5&&h<19){g.fillStyle='rgba(255,160,50,.12)';g.fillRect(0,0,W,H)}
+ if(d>0){const gr=g.createRadialGradient(B.x-cam+40,B.y,30,B.x-cam+40,B.y,230);gr.addColorStop(0,`rgba(8,14,40,${d*.3})`);gr.addColorStop(1,`rgba(8,14,40,${d})`);g.fillStyle=gr;g.fillRect(-10,0,W+20,H)}
+ g.restore();
+ if(mode==='sail'||mode==='event')hud();
+}
+function hud(){
+ const h=Math.floor(clock/60)%24,m=Math.floor(clock%60),el=(clock-startClock)/60,left=cur.deadline-el;
+ pn(12,12,230,114);
+ tx(`Dia ${S.day} · ${pad(h)}:${pad(m)} ${h>=19||h<6?'🌙':'☀️'}`,22,34,'#3b2f22','bold 15px ui-monospace,monospace');
+ tx('Diesel',22,57);br(80,48,150,B.fuel/TANK[S.tank],B.fuel/TANK[S.tank]<.15?'#c0392b':'#d9a441');
+ tx('Casco',22,77);br(80,68,150,B.hull/B.hullMax,B.hull/B.hullMax<.3?'#c0392b':'#4a9a5a');
+ tx(R(S.money),22,100);tx('Rep. '+S.rep,150,100);tx('Acelerador '+Math.round(B.th*100)+'%',22,118);
+ pn(W-232,12,220,58);
+ tx(`${cur.cargo} ×${lots} → ${cur.dest}`,W-222,34);
+ tx(left>=0?`Prazo: ${Math.floor(left)}h${pad(Math.floor((left%1)*60))}`:'ATRASADO',W-222,58,left<3?'#b02a20':'#3b2f22','bold 15px ui-monospace,monospace');
+ const x0=70,x1=W-70,y=H-30,p=clamp(B.x/END,0,1);
+ g.fillStyle='#0006';g.fillRect(x0,y,x1-x0,6);g.fillStyle='#e8d08f';g.fillRect(x0,y,(x1-x0)*p,6);
+ for(const[q,n]of[[0,'São Simão'],[LOCK/END,'Eclusa'],[1,'Pederneiras']]){g.fillStyle='#fff';g.fillRect(x0+(x1-x0)*q-2,y-4,4,14);tw(n,x0+(x1-x0)*q,y-9,'11px ui-monospace,monospace','center')}
+ g.fillStyle='#2f6fb0';g.fillRect(x0+(x1-x0)*p-5,y-3,10,12);
+ toasts.forEach((t,i)=>tw(t.txt,W/2,H-70-i*22,'bold 15px ui-monospace,monospace','center'));
+ tw('W/S ou ↑/↓: leme · A/D ou ←/→: acelerador · P: pausa · M: som',W/2,H-8,'11px ui-monospace,monospace','center');
+ if(paused)tw('PAUSA — P para continuar',W/2,H/2,'bold 28px ui-monospace,monospace','center');
+}
+/* ===== Loop ===== */
+let last=0;
+function loop(ts){const dt=Math.min(.05,(ts-last)/1000||0);last=ts;update(dt);render();requestAnimationFrame(loop)}
+title();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
